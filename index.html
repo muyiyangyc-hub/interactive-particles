@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>幻境粒子球 - 双倍爱心版</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #020305;
+            cursor: crosshair;
+            font-family: 'Courier New', Courier, monospace; 
+        }
+
+        #particle-canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        #tech-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #00ffff;
+            pointer-events: none;
+            user-select: none;
+            z-index: 10;
+            font-size: 12px;
+            line-height: 1.8;
+            text-shadow: 0 0 5px rgba(0, 255, 255, 0.5);
+            background: rgba(0, 10, 20, 0.5);
+            padding: 15px 20px;
+            border: 1px solid rgba(0, 255, 255, 0.2);
+            border-radius: 8px;
+            backdrop-filter: blur(8px);
+            transition: border-color 0.3s, box-shadow 0.3s;
+        }
+
+        .panel-title {
+            font-size: 16px;
+            font-weight: bold;
+            letter-spacing: 2px;
+            margin-bottom: 10px;
+            border-bottom: 1px solid rgba(0, 255, 255, 0.4);
+            padding-bottom: 5px;
+            display: inline-block;
+        }
+
+        .data-row {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 3px;
+        }
+        
+        .data-label {
+            color: #55aaaa;
+            width: 105px; 
+        }
+
+        #cam-status {
+            margin-top: 10px;
+            color: #aaa;
+            font-size: 10px;
+            border-top: 1px dashed rgba(0, 255, 255, 0.3);
+            padding-top: 10px;
+        }
+
+        #instruction {
+            position: absolute;
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            color: rgba(255, 51, 102, 0.8);
+            font-size: 1.1rem;
+            font-weight: bold;
+            letter-spacing: 2px;
+            text-shadow: 0 0 10px rgba(255, 51, 102, 0.5);
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="tech-panel">
+        <div class="panel-title">粒子·幻境 RESONANCE</div>
+        <div class="data-row">
+            <span class="data-label">GESTURE:</span>
+            <span id="ui-gesture">WAITING...</span>
+        </div>
+        <div class="data-row">
+            <span class="data-label">SYS_STATE:</span>
+            <span id="ui-form">NORMAL_ORBIT</span>
+        </div>
+        <div class="data-row">
+            <span class="data-label">Z_SCALE:</span>
+            <span id="ui-scale">1.00x</span>
+        </div>
+        <div class="data-row">
+            <span class="data-label">TIME_DILATION:</span>
+            <span id="ui-time" style="color: #0f0;">1.00x</span>
+        </div>
+        <div class="data-row">
+            <span class="data-label">HAND_SYNC:</span>
+            <span id="ui-sync">OFFLINE</span>
+        </div>
+        <div id="cam-status">INITIALIZING NEURAL NET...</div>
+    </div>
+
+    <div id="instruction">🫶 尝试对准镜头“双手比心” 🫶</div>
+
+    <video id="webcam" autoplay playsinline style="display: none;"></video>
+    <canvas id="particle-canvas"></canvas>
+
+    <script type="module">
+        import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+        
+        const canvas = document.getElementById('particle-canvas');
+        const ctx = canvas.getContext('2d');
+
+        let particlesArray = [];
+        let ambientParticlesArray = []; 
+        let shockwaves = []; 
+        
+        let screenCenterX = window.innerWidth / 2;
+        let screenCenterY = window.innerHeight / 2;
+        let centerX = screenCenterX;
+        let centerY = screenCenterY;
+        let targetCenterX = screenCenterX;
+        let targetCenterY = screenCenterY;
+
+        let fov = 800; 
+        let rotationX = 0; 
+        let rotationY = 0; 
+        let targetRotationX = 0; 
+        let targetRotationY = 0; 
+        let globalScale = 1.0;
+        let targetGlobalScale = 1.0;
+        let timeScale = 1.0;
+        let targetTimeScale = 1.0;
+
+        let cursorX = screenCenterX;
+        let cursorY = screenCenterY;
+        let activeHandsLandmarks = []; 
+
+        // --- 形态状态 ---
+        let currentForm = 'SPHERE'; 
+        let previousForm = 'SPHERE';
+        let formChangeTime = Date.now(); 
+        let totalShells = 4; 
+        let globalCoreHue = 190; 
+        let currentCoreRadius = 40; 
+
+        // 粒子形状库，圆形的概率最高，以保证整体依然柔和
+        const shapePalette = ['circle', 'circle', 'circle', 'circle', 'rect', 'triangle', 'star'];
+
+        function setForm(newForm) {
+            if (currentForm !== newForm) {
+                if ((currentForm === 'EXPLOSION' || currentForm === 'IMPLOSION') && (newForm === 'SPHERE' || newForm === 'HEART')) {
+                    shockwaves.push(new Shockwave(globalCoreHue));
+                }
+                previousForm = currentForm;
+                currentForm = newForm;
+                formChangeTime = Date.now(); 
+            }
+        }
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            screenCenterX = canvas.width / 2;
+            screenCenterY = canvas.height / 2;
+            targetCenterX = screenCenterX;
+            targetCenterY = screenCenterY;
+            initParticles();
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+
+        window.addEventListener('mousemove', (e) => {
+            cursorX = e.clientX;
+            cursorY = e.clientY;
+            targetRotationY = (e.clientX / window.innerWidth - 0.5) * Math.PI * 2;
+            targetRotationX = (e.clientY / window.innerHeight - 0.5) * Math.PI;
+            
+            if(e.buttons === 4) {
+                targetCenterX = e.clientX;
+                targetCenterY = e.clientY;
+                setForm('INFINITY');
+            } else if (currentForm === 'INFINITY' && activeHandsLandmarks.length === 0) {
+                targetCenterX = screenCenterX;
+                targetCenterY = screenCenterY;
+                setForm('SPHERE');
+            }
+        });
+        window.addEventListener('mousedown', (e) => {
+            if (e.button === 0) setForm('CUBE');
+            if (e.button === 2) setForm('HEART'); 
+        });
+        window.addEventListener('mouseup', (e) => {
+            if (e.button === 0 || e.button === 2) setForm('SPHERE');
+        });
+        window.addEventListener('contextmenu', e => e.preventDefault());
+        
+        window.addEventListener('wheel', (e) => {
+            targetGlobalScale -= e.deltaY * 0.0015;
+            targetGlobalScale = Math.max(0.3, Math.min(targetGlobalScale, 3.5));
+        });
+
+        class Shockwave {
+            constructor(hue) {
+                this.radius = currentCoreRadius;
+                this.alpha = 1.0;
+                this.thickness = 10;
+                this.hue = hue;
+                this.x = centerX;
+                this.y = centerY;
+            }
+            update() {
+                this.radius += (30 * globalScale) * Math.max(timeScale, 0.5); 
+                this.alpha -= 0.015 * Math.max(timeScale, 0.5);
+                this.thickness += 0.5 * Math.max(timeScale, 0.5);
+            }
+            draw() {
+                if(this.alpha <= 0) return;
+                ctx.save();
+                ctx.globalCompositeOperation = 'lighter';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.lineWidth = this.thickness * globalScale;
+                ctx.strokeStyle = `hsla(${this.hue}, 100%, 70%, ${this.alpha})`;
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
+
+        class AmbientParticle {
+            constructor() {
+                this.x = Math.random() * canvas.width;
+                this.y = Math.random() * canvas.height;
+                this.size = Math.random() * 1.5;
+                this.baseVx = (Math.random() - 0.5) * 0.5;
+                this.baseVy = (Math.random() - 0.5) * 0.5;
+                this.vx = 0; 
+                this.vy = 0; 
+                this.alpha = Math.random() * 0.6 + 0.1;
+                this.shapeType = shapePalette[Math.floor(Math.random() * shapePalette.length)];
+            }
+            update() {
+                let dx = this.x - cursorX;
+                let dy = this.y - cursorY;
+                let dist = Math.sqrt(dx*dx + dy*dy);
+                let repelRadius = 150 * globalScale;
+
+                if (dist < repelRadius) {
+                    let force = (repelRadius - dist) / repelRadius;
+                    this.vx += (dx / dist) * force * 1.5;
+                    this.vy += (dy / dist) * force * 1.5;
+                }
+
+                this.vx *= 0.92;
+                this.vy *= 0.92;
+
+                this.x += (this.baseVx + this.vx) * globalScale * timeScale;
+                this.y += (this.baseVy + this.vy) * globalScale * timeScale;
+                
+                if(currentForm === 'CHAOS') {
+                    this.x += (Math.random() - 0.5) * 2 * timeScale;
+                    this.y += (Math.random() - 0.5) * 2 * timeScale;
+                }
+
+                if (this.x < 0) this.x = canvas.width;
+                if (this.x > canvas.width) this.x = 0;
+                if (this.y < 0) this.y = canvas.height;
+                if (this.y > canvas.height) this.y = 0;
+            }
+            draw() {
+                ctx.fillStyle = `hsla(${globalCoreHue}, 100%, 60%, ${this.alpha})`;
+                ctx.beginPath();
+                
+                let s = this.size * globalScale;
+                
+                if (this.shapeType === 'circle') {
+                    ctx.arc(this.x, this.y, s, 0, Math.PI * 2);
+                } else if (this.shapeType === 'rect') {
+                    ctx.rect(this.x - s, this.y - s, s * 2, s * 2);
+                } else if (this.shapeType === 'triangle') {
+                    ctx.moveTo(this.x, this.y - s);
+                    ctx.lineTo(this.x + s, this.y + s);
+                    ctx.lineTo(this.x - s, this.y + s);
+                } else if (this.shapeType === 'star') {
+                    ctx.moveTo(this.x, this.y - s * 1.5);
+                    ctx.lineTo(this.x + s * 0.3, this.y - s * 0.3);
+                    ctx.lineTo(this.x + s * 1.5, this.y);
+                    ctx.lineTo(this.x + s * 0.3, this.y + s * 0.3);
+                    ctx.lineTo(this.x, this.y + s * 1.5);
+                    ctx.lineTo(this.x - s * 0.3, this.y + s * 0.3);
+                    ctx.lineTo(this.x - s * 1.5, this.y);
+                    ctx.lineTo(this.x - s * 0.3, this.y - s * 0.3);
+                }
+                
+                ctx.fill();
+            }
+        }
+
+        class Particle {
+            constructor(shellRadius, thickness, shellIndex) {
+                this.baseTheta = Math.random() * Math.PI * 2; 
+                this.basePhi = Math.acos((Math.random() * 2) - 1); 
+                this.baseRadius = shellRadius + (Math.random() * thickness - thickness/2); 
+                this.shellIndex = shellIndex; 
+                
+                this.baseHue = 185 + Math.random() * 25; 
+                this.hueOffset = Math.random() * 40 - 20; 
+                this.alpha = Math.random() * 0.5 + 0.3;
+                this.baseSize = Math.random() * 1.5 + 0.2;
+                this.baseSpinSpeed = ((Math.random() - 0.5) * 0.002) + (50 / shellRadius) * 0.005;
+
+                this.currentX = this.baseRadius * Math.sin(this.basePhi) * Math.cos(this.baseTheta);
+                this.currentY = this.baseRadius * Math.sin(this.basePhi) * Math.sin(this.baseTheta);
+                this.currentZ = this.baseRadius * Math.cos(this.basePhi);
+                this.currentHue = this.baseHue;
+                this.theta = this.baseTheta; 
+
+                this.shapeType = shapePalette[Math.floor(Math.random() * shapePalette.length)];
+
+                let r1 = Math.random() * 2 - 1;
+                let r2 = Math.random() * 2 - 1;
+                let r3 = Math.random() * 2 - 1;
+                let max = Math.max(Math.abs(r1), Math.abs(r2), Math.abs(r3));
+                this.cubeX = (r1 / max) * shellRadius * 1.2;
+                this.cubeY = (r2 / max) * shellRadius * 1.2;
+                this.cubeZ = (r3 / max) * shellRadius * 1.2;
+
+                this.prevX2d = 0;
+                this.prevY2d = 0;
+                this.x2d = 0;
+                this.y2d = 0;
+            }
+
+            update() {
+                if(this.x2d !== 0) {
+                    this.prevX2d = this.x2d;
+                    this.prevY2d = this.y2d;
+                }
+
+                let activeForm = currentForm;
+                let timeMultiplier = (timeScale < 0.5) ? 2.5 : 1.0; 
+                let timeSinceChange = (Date.now() - formChangeTime) / timeMultiplier;
+                let layerDelay = 0;
+
+                if (currentForm === 'IMPLOSION' || currentForm === 'TORUS') {
+                    layerDelay = (totalShells - 1 - this.shellIndex) * 200; 
+                } else {
+                    layerDelay = this.shellIndex * 150; 
+                }
+
+                if (timeSinceChange < layerDelay) {
+                    activeForm = previousForm;
+                }
+
+                let targetX, targetY, targetZ;
+                let targetHue = this.baseHue;
+                let currentSpinSpeed = this.baseSpinSpeed;
+                
+                let t = this.theta;
+
+                switch (activeForm) {
+                    case 'HEART': 
+                        let hScale = this.baseRadius / 15; 
+                        targetX = (16 * Math.pow(Math.sin(t), 3)) * hScale;
+                        targetY = -(13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t)) * hScale;
+                        targetZ = this.baseRadius * Math.cos(this.basePhi) * 0.2; 
+                        targetHue = 330; 
+                        currentSpinSpeed = this.baseSpinSpeed * 3; 
+                        break;
+                    case 'TORUS': 
+                        let R = 180 + (this.shellIndex * 20); 
+                        let r = 40 + (Math.random() * 20); 
+                        targetX = (R + r * Math.cos(this.basePhi)) * Math.cos(t);
+                        targetY = (R + r * Math.cos(this.basePhi)) * Math.sin(t);
+                        targetZ = r * Math.sin(this.basePhi);
+                        targetHue = 270; 
+                        currentSpinSpeed = this.baseSpinSpeed * 5; 
+                        break;
+                    case 'DNA': 
+                        let strand = this.shellIndex % 2 === 0 ? 1 : -1;
+                        let zPos = (this.basePhi / Math.PI - 0.5) * 600; 
+                        targetX = (80 + Math.random()*20) * Math.cos(zPos * 0.015 + t * 2) * strand;
+                        targetY = (80 + Math.random()*20) * Math.sin(zPos * 0.015 + t * 2) * strand;
+                        targetZ = zPos;
+                        targetHue = 130; 
+                        currentSpinSpeed = this.baseSpinSpeed * 2;
+                        break;
+                    case 'INFINITY': 
+                        let a = 250 + (this.shellIndex * 30);
+                        let scaleInf = 2 / (3 - Math.cos(2 * t));
+                        targetX = a * scaleInf * Math.cos(t);
+                        targetY = a * scaleInf * Math.sin(2 * t) / 2;
+                        targetZ = this.baseRadius * Math.cos(this.basePhi) * 0.4;
+                        targetHue = 300; 
+                        currentSpinSpeed = this.baseSpinSpeed * 4;
+                        break;
+                    case 'CUBE': 
+                        targetX = this.cubeX * Math.cos(t) - this.cubeZ * Math.sin(t);
+                        targetY = this.cubeY;
+                        targetZ = this.cubeX * Math.sin(t) + this.cubeZ * Math.cos(t);
+                        targetHue = 45; 
+                        currentSpinSpeed = this.baseSpinSpeed * 3; 
+                        break;
+                    case 'IMPLOSION': 
+                        targetX = (10 + Math.random()*15) * Math.sin(this.basePhi) * Math.cos(t * 8);
+                        targetY = (10 + Math.random()*15) * Math.sin(this.basePhi) * Math.sin(t * 8);
+                        targetZ = (10 + Math.random()*15) * Math.cos(this.basePhi);
+                        targetHue = 0; 
+                        currentSpinSpeed = this.baseSpinSpeed * 15; 
+                        break;
+                    case 'SPHERE': 
+                    default: 
+                        targetX = this.baseRadius * Math.sin(this.basePhi) * Math.cos(t);
+                        targetY = this.baseRadius * Math.sin(this.basePhi) * Math.sin(t);
+                        targetZ = this.baseRadius * Math.cos(this.basePhi);
+                        break;
+                }
+
+                const lerpSpeed = (0.05 + (this.shellIndex * 0.01)) * Math.max(timeScale, 0.2);
+                
+                this.currentX += (targetX - this.currentX) * lerpSpeed;
+                this.currentY += (targetY - this.currentY) * lerpSpeed;
+                this.currentZ += (targetZ - this.currentZ) * lerpSpeed;
+                this.currentHue += (targetHue - this.currentHue) * lerpSpeed;
+
+                this.theta += currentSpinSpeed * timeScale;
+
+                let cosX = Math.cos(rotationX); let sinX = Math.sin(rotationX);
+                let y1 = this.currentY * cosX - this.currentZ * sinX;   
+                let z1 = this.currentY * sinX + this.currentZ * cosX;
+
+                let cosY = Math.cos(rotationY); let sinY = Math.sin(rotationY);
+                let x2 = this.currentX * cosY + z1 * sinY;  
+                let z2 = -this.currentX * sinY + z1 * cosY;
+
+                let scale = (fov / (fov + z2)) * globalScale;
+                this.x2d = centerX + x2 * scale; 
+                this.y2d = centerY + y1 * scale; 
+                this.size = this.baseSize * scale;
+                this.projectedZ = z2;
+
+                if (this.prevX2d === 0) {
+                    this.prevX2d = this.x2d;
+                    this.prevY2d = this.y2d;
+                }
+            }
+
+            draw() {
+                if (this.projectedZ < -fov) return;
+                
+                let finalHue = this.currentHue + this.hueOffset;
+                
+                if ((currentForm === 'TORUS' || currentForm === 'HEART' || currentForm === 'INFINITY') && timeScale > 1.2) {
+                    ctx.beginPath();
+                    ctx.moveTo(this.prevX2d, this.prevY2d);
+                    ctx.lineTo(this.x2d, this.y2d);
+                    ctx.lineWidth = this.size * 1.5;
+                    ctx.strokeStyle = `hsla(${finalHue}, 100%, 70%, ${this.alpha})`;
+                    ctx.stroke();
+                } else {
+                    ctx.fillStyle = `hsla(${finalHue}, 100%, 60%, ${this.alpha})`;
+                    ctx.beginPath();
+                    
+                    let s = this.size;
+                    
+                    if (this.shapeType === 'circle') {
+                        ctx.arc(this.x2d, this.y2d, s, 0, Math.PI * 2);
+                    } else if (this.shapeType === 'rect') {
+                        ctx.rect(this.x2d - s, this.y2d - s, s * 2, s * 2);
+                    } else if (this.shapeType === 'triangle') {
+                        ctx.moveTo(this.x2d, this.y2d - s);
+                        ctx.lineTo(this.x2d + s, this.y2d + s);
+                        ctx.lineTo(this.x2d - s, this.y2d + s);
+                    } else if (this.shapeType === 'star') {
+                        ctx.moveTo(this.x2d, this.y2d - s * 1.5);
+                        ctx.lineTo(this.x2d + s * 0.3, this.y2d - s * 0.3);
+                        ctx.lineTo(this.x2d + s * 1.5, this.y2d);
+                        ctx.lineTo(this.x2d + s * 0.3, this.y2d + s * 0.3);
+                        ctx.lineTo(this.x2d, this.y2d + s * 1.5);
+                        ctx.lineTo(this.x2d - s * 0.3, this.y2d + s * 0.3);
+                        ctx.lineTo(this.x2d - s * 1.5, this.y2d);
+                        ctx.lineTo(this.x2d - s * 0.3, this.y2d - s * 0.3);
+                    }
+                    
+                    ctx.fill();
+                }
+            }
+        }
+
+        // --- 修复完成的初始化函数 ---
+        function initParticles() {
+            particlesArray = [];
+            ambientParticlesArray = [];
+            
+            for(let i=0; i<180; i++) { 
+                ambientParticlesArray.push(new AmbientParticle());
+            }
+
+            const shells = [
+                { radius: 60, count: 1000, thickness: 30 },  
+                { radius: 150, count: 1800, thickness: 50 }, 
+                { radius: 260, count: 2500, thickness: 70 }, 
+                { radius: 400, count: 1500, thickness: 90 }  
+            ];
+            totalShells = shells.length;
+
+            let screenScale = Math.min(canvas.width, canvas.height) / 900;
+            
+            shells.forEach((shell, index) => {
+                for (let i = 0; i < shell.count; i++) {
+                    particlesArray.push(new Particle(shell.radius * screenScale, shell.thickness * screenScale, index));
+                }
+            });
+        }
+
+        // --- 修复完成的星尘连线函数 ---
+        function drawConstellations() {
+            ctx.lineWidth = 0.5 * globalScale;
+            for(let i=0; i<ambientParticlesArray.length; i++) {
+                for(let j=i+1; j<ambientParticlesArray.length; j++) {
+                    let p1 = ambientParticlesArray[i];
+                    let p2 = ambientParticlesArray[j];
+                    let dx = p1.x - p2.x;
+                    let dy = p1.y - p2.y;
+                    let dist = dx*dx + dy*dy;
+                    
+                    let connectDist = 10000 * globalScale; 
+                    if(dist < connectDist) { 
+                        let alpha = 0.2 * (1 - dist/connectDist);
+                        ctx.strokeStyle = `hsla(${globalCoreHue}, 100%, 70%, ${alpha})`;
+                        ctx.beginPath();
+                        ctx.moveTo(p1.x, p1.y);
+                        ctx.lineTo(p2.x, p2.y);
+                        ctx.stroke();
+                    }
+                }
+            }
+        }
+
+        // 注意：彻底移除了 drawHandTethers() 及其调用，确保画布极致纯净
+
+        function animate() {
+            rotationX += (targetRotationX - rotationX) * 0.08;
+            rotationY += (targetRotationY - rotationY) * 0.08;
+            globalScale += (targetGlobalScale - globalScale) * 0.1; 
+            
+            centerX += (targetCenterX - centerX) * 0.08;
+            centerY += (targetCenterY - centerY) * 0.08;
+
+            if (currentForm === 'EXPLOSION') {
+                targetTimeScale = 0.05; 
+            } else if (currentForm === 'GALAXY') {
+                targetTimeScale = 2.5; 
+            } else {
+                targetTimeScale = 1.0;  
+            }
+            timeScale += (targetTimeScale - timeScale) * 0.1;
+
+            document.getElementById('ui-scale').innerText = globalScale.toFixed(2) + 'x';
+            let timeUI = document.getElementById('ui-time');
+            timeUI.innerText = timeScale.toFixed(2) + 'x';
+            if (timeScale < 0.5) timeUI.style.color = '#ff0'; 
+            else if (timeScale > 1.5) timeUI.style.color = '#00f'; 
+            else timeUI.style.color = '#0f0'; 
+
+            ctx.globalCompositeOperation = 'source-over';
+            let clearAlpha = Math.max(0.1, 0.4 * timeScale);
+            if (currentForm === 'GALAXY') clearAlpha = 0.2; 
+            ctx.fillStyle = `rgba(2, 3, 5, ${clearAlpha})`; 
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.globalCompositeOperation = 'lighter';
+
+            ambientParticlesArray.forEach(p => p.update());
+            if(currentForm === 'SPHERE' || currentForm === 'INFINITY') {
+                drawConstellations(); 
+            }
+            ambientParticlesArray.forEach(p => p.draw());
+
+            let targetCoreHue = 190;
+            let targetCoreRadius = 40;
+            if (currentForm === 'TORUS') { targetCoreHue = 270; targetCoreRadius = 25; } 
+            if (currentForm === 'IMPLOSION') { targetCoreHue = 0; targetCoreRadius = 20; } 
+            if (currentForm === 'CUBE') { targetCoreHue = 45; targetCoreRadius = 20; }
+            if (currentForm === 'DNA') { targetCoreHue = 130; targetCoreRadius = 0; } 
+            if (currentForm === 'INFINITY') { targetCoreHue = 300; targetCoreRadius = 30; } 
+            if (currentForm === 'HEART') { targetCoreHue = 345; targetCoreRadius = 60; } 
+            
+            globalCoreHue += (targetCoreHue - globalCoreHue) * 0.1;
+            currentCoreRadius += (targetCoreRadius - currentCoreRadius) * 0.1;
+
+            let renderCoreRadius = currentCoreRadius * globalScale;
+
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, renderCoreRadius * 2, 0, Math.PI * 2);
+            let outerGlow = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, renderCoreRadius * 2);
+            outerGlow.addColorStop(0, `hsla(${globalCoreHue}, 100%, 50%, 0.3)`);
+            outerGlow.addColorStop(1, `hsla(${globalCoreHue}, 100%, 50%, 0)`);
+            ctx.fillStyle = outerGlow;
+            ctx.fill();
+
+            if (currentForm === 'IMPLOSION') {
+                ctx.globalCompositeOperation = 'source-over'; 
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, renderCoreRadius * 0.9, 0, Math.PI * 2);
+                ctx.fillStyle = '#000000';
+                ctx.fill();
+                ctx.globalCompositeOperation = 'lighter'; 
+                
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, renderCoreRadius * 1.0, 0, Math.PI * 2);
+                ctx.lineWidth = 3 * globalScale;
+                ctx.strokeStyle = `rgba(255, 100, 0, 0.9)`;
+                ctx.stroke();
+            } else {
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, renderCoreRadius, 0, Math.PI * 2);
+                let innerGlow = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, renderCoreRadius);
+                innerGlow.addColorStop(0, `hsla(${globalCoreHue}, 100%, 90%, 1)`);
+                innerGlow.addColorStop(0.5, `hsla(${globalCoreHue}, 100%, 70%, 0.8)`);
+                innerGlow.addColorStop(1, `hsla(${globalCoreHue}, 100%, 50%, 0)`);
+                ctx.fillStyle = innerGlow;
+                ctx.fill();
+            }
+
+            for (let i = 0; i < particlesArray.length; i++) {
+                particlesArray[i].update();
+            }
+            particlesArray.sort((a, b) => b.projectedZ - a.projectedZ);
+            for (let i = 0; i < particlesArray.length; i++) {
+                particlesArray[i].draw();
+            }
+
+            for (let i = shockwaves.length - 1; i >= 0; i--) {
+                shockwaves[i].update();
+                shockwaves[i].draw();
+                if(shockwaves[i].alpha <= 0) {
+                    shockwaves.splice(i, 1);
+                }
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        resizeCanvas();
+        animate();
+
+        // ==========================================
+        // --- 终极手势识别 (新增支持 2 只手) ---
+        // ==========================================
+        const video = document.getElementById('webcam');
+        const camStatus = document.getElementById('cam-status');
+        const uiSync = document.getElementById('ui-sync');
+        const uiGesture = document.getElementById('ui-gesture');
+        const uiForm = document.getElementById('ui-form');
+        const techPanel = document.getElementById('tech-panel');
+
+        let handLandmarker = undefined;
+        let lastVideoTime = -1;
+
+        async function createHandLandmarker() {
+            try {
+                const vision = await FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+                );
+                handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                        delegate: "GPU"
+                    },
+                    runningMode: "VIDEO",
+                    numHands: 2 
+                });
+                startCamera();
+            } catch (error) {
+                camStatus.innerText = "ERR: NEURAL NET LOAD FAILED.";
+                camStatus.style.color = "#f44";
+            }
+        }
+
+        function startCamera() {
+            navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
+                video.srcObject = stream;
+                video.addEventListener("loadeddata", predictWebcam);
+                camStatus.innerText = "SYS: MULTI-SENSOR ACTIVE.";
+                camStatus.style.color = "#0f0";
+            });
+        }
+
+        function calcDistance(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
+        }
+
+        function detectGestureType(landmarks) {
+            const wrist = landmarks[0];
+            const palmCenter = landmarks[9];
+            const palmSize = calcDistance(wrist, palmCenter);
+            const getDist = (idx1, idx2) => calcDistance(landmarks[idx1], landmarks[idx2]);
+
+            const isExtended = (tipIdx, pipIdx) => getDist(tipIdx, 0) > getDist(pipIdx, 0) * 1.25;
+
+            const indexUp = isExtended(8, 5);
+            const middleUp = isExtended(12, 9);
+            const ringUp = isExtended(16, 13);
+            const pinkyUp = isExtended(20, 17);
+
+            const upCount = [indexUp, middleUp, ringUp, pinkyUp].filter(Boolean).length;
+
+            const pinchDist = getDist(4, 8);
+            const indexToWrist = getDist(8, 0);
+            if (pinchDist < palmSize * 0.4 && indexToWrist > palmSize * 1.1) {
+                return 'PINCH';
+            }
+
+            if (indexUp && !middleUp && !ringUp && !pinkyUp) {
+                return 'POINT';
+            }
+
+            const avgTipDist = (getDist(8, 0) + getDist(12, 0) + getDist(16, 0) + getDist(20, 0)) / 4;
+            if (upCount === 0 && avgTipDist < palmSize * 1.3) {
+                return 'FIST';
+            }
+            
+            if (upCount >= 3) return 'OPEN_HAND';
+            if (indexUp && middleUp && !ringUp && !pinkyUp) return 'PEACE';
+            if (indexUp && !middleUp && !ringUp && pinkyUp) return 'ROCK';
+
+            return 'UNKNOWN';
+        }
+
+        async function predictWebcam() {
+            if (lastVideoTime !== video.currentTime && handLandmarker) {
+                lastVideoTime = video.currentTime;
+                const results = handLandmarker.detectForVideo(video, performance.now());
+
+                if (results.landmarks && results.landmarks.length > 0) {
+                    activeHandsLandmarks = results.landmarks; 
+                    
+                    let gesture = 'UNKNOWN';
+                    let themeColor = '#00ffff'; 
+                    let palmX = 0, palmY = 0;
+                    
+                    if (results.landmarks.length === 2) {
+                        const hand1 = results.landmarks[0];
+                        const hand2 = results.landmarks[1];
+                        
+                        palmX = (hand1[9].x + hand2[9].x) / 2;
+                        palmY = (hand1[9].y + hand2[9].y) / 2;
+
+                        const distThumbs = calcDistance(hand1[4], hand2[4]);
+                        const distIndexes = calcDistance(hand1[8], hand2[8]);
+                        
+                        if (distThumbs < 0.2 && distIndexes < 0.2) {
+                            gesture = 'TWO_HAND_HEART';
+                        } else {
+                            gesture = detectGestureType(hand1);
+                        }
+                    } else {
+                        const hand1 = results.landmarks[0];
+                        palmX = hand1[9].x;
+                        palmY = hand1[9].y;
+                        gesture = detectGestureType(hand1);
+                    }
+                    
+                    targetRotationY = (1.0 - palmX - 0.5) * Math.PI * 2; 
+                    targetRotationX = (palmY - 0.5) * Math.PI;
+
+                    const wrist = results.landmarks[0][0];
+                    const middleTip = results.landmarks[0][12];
+                    const handSizeRatio = Math.sqrt(Math.pow(wrist.x - middleTip.x, 2) + Math.pow(wrist.y - middleTip.y, 2));
+                    let calculatedScale = 0.3 + (handSizeRatio * 3.5);
+                    targetGlobalScale = Math.max(0.5, Math.min(calculatedScale, 2.5));
+
+                    if (gesture === 'TWO_HAND_HEART') {
+                        setForm('HEART');
+                        targetCenterX = screenCenterX;
+                        targetCenterY = screenCenterY;
+                        uiGesture.innerText = '[🫶] TWO_HAND_HEART';
+                        uiForm.innerText = 'LOVE_RESONANCE';
+                        themeColor = '#ff3366'; 
+                    } 
+                    else if (gesture === 'OPEN_HAND') {
+                        setForm('SPHERE');
+                        targetCenterX = screenCenterX;
+                        targetCenterY = screenCenterY;
+                        uiGesture.innerText = '[🖐️] OPEN_HAND';
+                        uiForm.innerText = 'NORMAL_SPHERE';
+                        themeColor = '#00ffff'; 
+                    } else if (gesture === 'PEACE') {
+                        setForm('TORUS');
+                        targetCenterX = screenCenterX;
+                        targetCenterY = screenCenterY;
+                        uiGesture.innerText = '[✌️] PEACE';
+                        uiForm.innerText = 'QUANTUM_TORUS';
+                        themeColor = '#aa55ff'; 
+                    } else if (gesture === 'FIST') {
+                        setForm('IMPLOSION');
+                        targetCenterX = screenCenterX;
+                        targetCenterY = screenCenterY;
+                        uiGesture.innerText = '[✊] FIST';
+                        uiForm.innerText = 'EVENT_HORIZON'; 
+                        themeColor = '#ff3300'; 
+                    } else if (gesture === 'PINCH') {
+                        setForm('CUBE');
+                        targetCenterX = screenCenterX;
+                        targetCenterY = screenCenterY;
+                        uiGesture.innerText = '[🤏] PINCH';
+                        uiForm.innerText = 'MATRIX_CUBE'; 
+                        themeColor = '#ffaa00'; 
+                    } else if (gesture === 'ROCK') {
+                        setForm('DNA');
+                        targetCenterX = screenCenterX;
+                        targetCenterY = screenCenterY;
+                        uiGesture.innerText = '[🤘] ROCK';
+                        uiForm.innerText = 'DNA_HELIX';
+                        themeColor = '#00ff88'; 
+                    } else if (gesture === 'POINT') {
+                        setForm('INFINITY');
+                        const indexTip = results.landmarks[0][8];
+                        targetCenterX = (1.0 - indexTip.x) * canvas.width;
+                        targetCenterY = indexTip.y * canvas.height;
+                        uiGesture.innerText = '[☝️] POINT';
+                        uiForm.innerText = 'INFINITY_LOOP';
+                        themeColor = '#ff00ff'; 
+                    }
+
+                    uiSync.innerText = "TRACKING " + results.landmarks.length + " HANDS";
+                    uiSync.style.color = "#0f0";
+                    uiGesture.style.color = themeColor;
+                    uiForm.style.color = themeColor;
+                    techPanel.style.borderColor = themeColor;
+                    techPanel.style.boxShadow = `0 0 15px ${themeColor}44`;
+
+                } else {
+                    activeHandsLandmarks = []; 
+                    targetRotationY -= 0.005; 
+                    targetGlobalScale = 1.0; 
+                    targetCenterX = screenCenterX;
+                    targetCenterY = screenCenterY;
+                    setForm('SPHERE');
+                    
+                    uiSync.innerText = "SEARCHING...";
+                    uiSync.style.color = "#ffaa00";
+                    uiGesture.innerText = "NONE";
+                    uiGesture.style.color = "#55aaaa";
+                    uiForm.innerText = "AUTO_CRUISE";
+                    uiForm.style.color = "#55aaaa";
+                    techPanel.style.borderColor = "rgba(0, 255, 255, 0.2)";
+                    techPanel.style.boxShadow = "none";
+                }
+            }
+            requestAnimationFrame(predictWebcam);
+        }
+
+        createHandLandmarker();
+
+    </script>
+</body>
+</html>
